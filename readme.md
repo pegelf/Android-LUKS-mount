@@ -31,7 +31,6 @@ The Disk Utility only supports ext4 as encrypted partition layout. To change the
 
 Once encrypted, insert the SD card into your Android device. It may prompt you to format the card – **do not do this**. To disable this notification, long-tap it, select the gear icon, and turn off system storage notifications. Note: This will also disable notifications for other devices, like USB sticks.
 
----
 
 ## Install Required Packages
 
@@ -48,7 +47,8 @@ To receive notifications from the script, install the Termux:API app:
 
 [Download Termux:API from F-Droid](https://f-droid.org/packages/com.termux.api/)
 
----
+
+
 
 ## Check LUKS Support
 
@@ -69,7 +69,7 @@ su -Mc "lsblk"
 
 In most cases, `mmcblk1` represents the entire SD card, while `mmcblk1p1` corresponds to the encrypted partition.
 
----
+
 
 ## Running the Script at Boot
 
