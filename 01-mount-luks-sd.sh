@@ -7,6 +7,7 @@ LUKS_NAME="LuksSD"
 MAPPER_PATH="/dev/mapper/$LUKS_NAME"
 MOUNT_POINT="/mnt/LuksSD.bind"
 BIND_TARGET="/sdcard/SD"
+BIND_USER= "media_rw" # insert the output of "whoami" command here, e.g. u0_a123. But media_rw also works for most apps.
 CRYPTSETUP_BIN="/data/data/com.termux/files/usr/bin/cryptsetup"
 BINDFS_BIN="/data/data/com.termux/files/usr/bin/bindfs"
 PASSWORD="LUKS_PASSWORD"
@@ -82,7 +83,7 @@ fi
 
 # Use Bindfs
 if su -Mc "$BINDFS_BIN -o nosuid,nodev,noatime,nonempty \
-    -u media_rw -g 9997 \
+    -u $BIND_USER -g 9997 \
     -p a-rwx,ug+rw,ugo+X \
     --create-with-perms=a-rwx,ug+rw,ugo+X \
     --xattr-none --chown-ignore --chgrp-ignore --chmod-ignore \
