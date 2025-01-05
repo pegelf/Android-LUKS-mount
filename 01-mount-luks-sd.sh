@@ -7,7 +7,7 @@ LUKS_NAME="LuksSD"
 MAPPER_PATH="/dev/mapper/$LUKS_NAME"
 MOUNT_POINT="/mnt/LuksSD.bind"
 BIND_TARGET="/sdcard/SD"
-BIND_USER= "media_rw" # insert the output of "whoami" command here, e.g. u0_a123. But media_rw also works for most apps.
+BIND_USER="media_rw" # Insert the output of "whoami" command here, e.g., u0_a123. But media_rw also works for most apps.
 CRYPTSETUP_BIN="/data/data/com.termux/files/usr/bin/cryptsetup"
 BINDFS_BIN="/data/data/com.termux/files/usr/bin/bindfs"
 PASSWORD="LUKS_PASSWORD"
@@ -38,8 +38,43 @@ notify() {
     fi
 }
 
+# Function to unmount
+unmount_sd() {
+    log "Starting unmount process..."
+
+    # Unmount bindfs
+    if su -Mc "umount $BIND_TARGET"; then
+        log "Bindfs unmounted successfully from $BIND_TARGET."
+    else
+        log "Failed to unmount bindfs from $BIND_TARGET."
+    fi
+
+    # Unmount main mount point
+    if su -Mc "umount $MOUNT_POINT"; then
+        log "Unmounted successfully from $MOUNT_POINT."
+    else
+        log "Failed to unmount $MOUNT_POINT."
+    fi
+
+    # Close LUKS container
+    if su -Mc "$CRYPTSETUP_BIN luksClose $LUKS_NAME"; then
+        log "LUKS container closed successfully."
+    else
+        log "Failed to close LUKS container."
+    fi
+
+    notify "Unmounting SD Card completed."
+    log "Unmount process completed."
+    exit 0
+}
+
 # Start logging
 log "Starting 01-mount-luks-sd.sh..."
+
+# Check if script is run with --umount
+if [ "$1" == "--umount" ]; then
+    unmount_sd
+fi
 
 # Check if already mounted
 if su -Mc "mount | grep -q \"$MOUNT_POINT\""; then
@@ -68,7 +103,7 @@ fi
 su -Mc "mkdir -p \"$MOUNT_POINT\""
 su -Mc "chown media_rw:media_rw $MOUNT_POINT"
 
- # Create bind target
+# Create bind target
 mkdir -p "$BIND_TARGET"
 
 # Mount the partition with the specified filesystem
