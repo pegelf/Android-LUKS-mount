@@ -117,7 +117,7 @@ else
 fi
 
 # Use Bindfs
-if su -Mc "$BINDFS_BIN -o nosuid,nodev,noatime,nonempty \
+if su -Mc "$BINDFS_BIN -o nosuid,nodev,noatime,nonempty,context=u:object_r:sdcardfs:s0 \
     -u $BIND_USER -g 9997 \
     -p a-rwx,ug+rw,ugo+X \
     --create-with-perms=a-rwx,ug+rw,ugo+X \
