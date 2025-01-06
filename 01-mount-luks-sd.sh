@@ -108,7 +108,9 @@ mkdir -p "$BIND_TARGET"
 
 # Mount the partition with the specified filesystem
 log "Using filesystem: $FILESYSTEM"
-if su -Mc "mount -t $FILESYSTEM -o rw $MAPPER_PATH $MOUNT_POINT"; then
+if su -Mc "mount -t $FILESYSTEM \
+    -o rw,umask=0000,context=u:object_r:fuse:s0 \
+    $MAPPER_PATH $MOUNT_POINT"; then
     log "$FILESYSTEM partition mounted successfully."
 else
     log "Failed to mount $FILESYSTEM partition."
