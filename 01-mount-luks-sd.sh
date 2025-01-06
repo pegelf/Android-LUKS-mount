@@ -109,7 +109,7 @@ mkdir -p "$BIND_TARGET"
 # Mount the partition with the specified filesystem
 log "Using filesystem: $FILESYSTEM"
 if su -Mc "mount -t $FILESYSTEM \
-    -o rw,umask=0000,context=u:object_r:fuse:s0 \
+    -o rw,umask=0000 \
     $MAPPER_PATH $MOUNT_POINT"; then
     log "$FILESYSTEM partition mounted successfully."
 else
@@ -120,7 +120,7 @@ fi
 
 # Use Bindfs
 if su -Mc "$BINDFS_BIN \
-    -o nosuid,nodev,noatime,nonempty,context=u:object_r:fuse:s0 \
+    -o nosuid,nodev,noatime,nonempty \
     -u $BIND_USER -g 9997 \
     -p a-rwx,ug+rw,o+rwx,ugo+X \
     --create-with-perms=a-rwx,ug+rw,o+rwx,ugo+X \
