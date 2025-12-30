@@ -18,6 +18,18 @@ PASSWORD="LUKS_PASSWORD"
 REAL_MOUNT_POINT="/mnt/LuksSD_Root"
 VISIBLE_MOUNT_POINT="/sdcard/SD"
 
+# Internal Folders Redirection
+# These folders on Internal Storage will be moved to SD and bind-mounted back.
+# CAUTION: Data will be moved physically to the encrypted SD card.
+REDIRECT_FOLDERS=(
+    "DCIM/Camera"
+    "Download"
+)
+
+# Folder on the LUKS SD where redirected folders are stored
+# We start with a dot (.) to hide it from standard file explorers
+HIDDEN_SD_STORAGE=".mountedinternal"
+
 # Filesystem Type (exfat, f2fs, ext4, etc.)
 FILESYSTEM="exfat"
 
@@ -52,10 +64,35 @@ notify() {
     fi
 }
 
+# Function to unmount specific bind folders (Downloads, DCIM, etc.)
+unbind_internal_folders() {
+    log "Unmounting redirected internal folders..."
+    
+    # Reverse loop through folders to handle potential nesting correctly
+    # (though usually not an issue with simple list)
+    for (( idx=${#REDIRECT_FOLDERS[@]}-1 ; idx>=0 ; idx-- )); do
+        folder="${REDIRECT_FOLDERS[idx]}"
+        target_path="/sdcard/$folder"
+        
+        # Check if it is a mountpoint
+        if su -Mc "mount | grep -q \" $target_path \""; then
+            if su -Mc "umount \"$target_path\""; then
+                log "Unbound: $folder"
+            else
+                log "Failed to unbind: $folder"
+                notify "Error: Could not unmount $folder"
+            fi
+        fi
+    done
+}
+
 unmount_sd() {
     log "Starting unmount process..."
 
-    # 1. Unmount the visible bind mount
+    # 1. Unmount redirected internal folders FIRST
+    unbind_internal_folders
+
+    # 2. Unmount the visible bind mount
     if su -Mc "mount | grep -q \"$VISIBLE_MOUNT_POINT\""; then
         if su -Mc "umount \"$VISIBLE_MOUNT_POINT\""; then
             log "Unmounted bind point $VISIBLE_MOUNT_POINT."
@@ -64,7 +101,7 @@ unmount_sd() {
         fi
     fi
 
-    # 2. Unmount the real mount point
+    # 3. Unmount the real mount point
     if su -Mc "mount | grep -q \"$REAL_MOUNT_POINT\""; then
         if su -Mc "umount \"$REAL_MOUNT_POINT\""; then
             log "Unmounted real mount point $REAL_MOUNT_POINT."
@@ -73,7 +110,7 @@ unmount_sd() {
         fi
     fi
 
-    # 3. Close LUKS container
+    # 4. Close LUKS container
     if [ -e "$MAPPER_PATH" ]; then
         if su -Mc "$CRYPTSETUP_BIN luksClose $LUKS_NAME"; then
             log "LUKS container closed successfully."
@@ -87,6 +124,84 @@ unmount_sd() {
     exit 0
 }
 
+bind_redirect_folders() {
+    log "Starting folder redirection..."
+    
+    # Define the physical storage path on the mounted SD
+    SD_STORAGE_PATH="$REAL_MOUNT_POINT/$HIDDEN_SD_STORAGE"
+    
+    # Create the storage directory on SD
+    su -Mc "mkdir -p \"$SD_STORAGE_PATH\""
+    
+    # Create .nomedia to prevent Gallery duplicates in the raw SD folder
+    # (Since files are visible in the bind target, we don't want them indexed twice)
+    su -Mc "touch \"$SD_STORAGE_PATH/.nomedia\""
+
+    # Fix permissions for the storage root
+    if [[ "$FILESYSTEM" != "exfat" && "$FILESYSTEM" != "vfat" ]]; then
+        su -Mc "chown 1023:9997 \"$SD_STORAGE_PATH\""
+        su -Mc "chmod 775 \"$SD_STORAGE_PATH\""
+    fi
+
+    for folder in "${REDIRECT_FOLDERS[@]}"; do
+        INTERNAL_PATH="/sdcard/$folder"
+        SD_PATH="$SD_STORAGE_PATH/$folder"
+
+        # 1. Create destination folder on SD if missing
+        su -Mc "mkdir -p \"$SD_PATH\""
+        
+        # Permissions for subfolder
+        if [[ "$FILESYSTEM" != "exfat" && "$FILESYSTEM" != "vfat" ]]; then
+            su -Mc "chown 1023:9997 \"$SD_PATH\""
+            su -Mc "chmod 775 \"$SD_PATH\""
+        fi
+
+        # 2. Check if Internal path exists and has content
+        # We only move data if the internal path exists and is NOT already a mountpoint
+        if su -Mc "[ -d \"$INTERNAL_PATH\" ]" && ! su -Mc "mount | grep -q \" $INTERNAL_PATH \""; then
+            
+            # Check if directory is not empty
+            if su -Mc "[ \"\$(ls -A \"$INTERNAL_PATH\")\" ]"; then
+                log "Migrating data for $folder to SD card..."
+                
+                # Move content. We use 'cp -rn' and 'rm' logic or 'mv' depending on preference.
+                # 'mv' is atomic on same FS, but copy-delete across FS.
+                # using 'mv' inside su -c.
+                # We use -n (no clobber) to prevent overwriting if file already exists on SD
+                
+                if su -Mc "mv -n \"$INTERNAL_PATH\"/* \"$SD_PATH\"/"; then
+                    log "Moved content of $folder successfully."
+                    # Clean up empty files on internal that were moved (mv -n leaves duplicates if they exist)
+                    # For safety, we only remove files if we are sure they exist on destination?
+                    # Simplified: We trust mv here. If files remain in Internal, they will be hidden by the mount.
+                else
+                    log "WARNING: Error moving files for $folder. Check logs. Proceeding with mount anyway."
+                    notify "Warning: Moving files for $folder failed."
+                fi
+            else
+                log "$folder is empty or only contains hidden files. No migration needed."
+            fi
+        fi
+
+        # 3. Create Internal mountpoint if it doesn't exist
+        su -Mc "mkdir -p \"$INTERNAL_PATH\""
+        su -Mc "chown media_rw:media_rw \"$INTERNAL_PATH\""
+
+        # 4. Bind Mount
+        if su -Mc "mount --bind \"$SD_PATH\" \"$INTERNAL_PATH\""; then
+            log "Bound $folder to SD card."
+        else
+            log "Failed to bind mount $folder."
+            notify "Failed to mount $folder"
+            continue
+        fi
+        
+        # 5. Restore SELinux Context on the bind mount
+        # Crucial for apps to access the bind-mounted folder
+        su -Mc "chcon u:object_r:sdcardfs:s0 \"$INTERNAL_PATH\""
+    done
+}
+
 # ==============================================================================
 # MAIN SCRIPT
 # ==============================================================================
@@ -98,9 +213,11 @@ if [ "$1" == "--umount" ]; then
     unmount_sd
 fi
 
-# 1. Check if already mounted
+# 1. Check if main SD is already mounted
 if su -Mc "mount | grep -q \"$VISIBLE_MOUNT_POINT\""; then
     log "Mount point $VISIBLE_MOUNT_POINT is already mounted."
+    # If main SD is mounted, check if redirects are missing and try to add them?
+    # For now, just exit to prevent double mounts.
     notify "Mounting Skipped: Already mounted."
     exit 0
 fi
