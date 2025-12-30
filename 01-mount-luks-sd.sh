@@ -5,33 +5,33 @@
 # ==============================================================================
 
 # Log file location
-LOGFILE="$(dirname "$0")/XperiaSD.log"
+LOGFILE="$(dirname "$0")/LuksSD.log"
 
 # LUKS Configuration
 LUKS_DEVICE="/dev/block/mmcblk1p1"
-LUKS_NAME="XperiaSD"
+LUKS_NAME="LuksSD"
 MAPPER_PATH="/dev/mapper/$LUKS_NAME"
 PASSWORD="LUKS_PW" # Replace with your password
 
 # Mount Configuration
 # MOUNT_POINT: The raw mount point (hidden from apps usually)
-MOUNT_POINT="/mnt/XperiaSD.bind"
+MOUNT_POINT="/mnt/LuksSD.bind"
 # BIND_TARGET: The visible mount point for the user
 BIND_TARGET="/sdcard/SD"
 
 # Internal Folders Redirection
 # These folders will be moved to the encrypted SD and mounted back via bindfs.
 REDIRECT_FOLDERS=(
-    "SwiftBackup"
-    "Download"
+    # "SwiftBackup"
+    # "Download"
 )
 
 # Folder on the raw SD where redirected folders are stored
 HIDDEN_SD_STORAGE=".mountedinternal"
 
 # Bindfs User Configuration
-# u0_a384 is your user from the logs. media_rw works too.
-BIND_USER="u0_a384"
+# user like u0_a384. media_rw works too.
+BIND_USER="media_rw"
 BIND_GROUP="9997" # 9997 is everybody/everybody
 
 # Filesystem Type
@@ -216,10 +216,8 @@ bind_redirect_folders() {
         fi
 
         # 4. Mount using BINDFS
-        # We use the exact same bindfs options as the main SD card
-        # This ensures permissions are mapped correctly for apps
         if run_su "$BINDFS_BIN \
-            -o nosuid,nodev,noatime,nonempty \
+            -o nosuid,nodev,nonempty \
             -u $BIND_USER -g $BIND_GROUP \
             -p a-rwx,ug+rw,o+rwx,ugo+X \
             --create-with-perms=a-rwx,ug+rw,o+rwx,ugo+X \
@@ -280,9 +278,10 @@ run_su "mkdir -p \"$BIND_TARGET\""
 
 # Mount the partition with the specified filesystem
 log "Using filesystem: $FILESYSTEM"
-# Using umask=0000 ensures the raw mount is fully writable for root/bindfs
+# Added uid=0,gid=0 to ensure root owns the raw mount. 
+# This helps bindfs (running as root) to perform privileged ops like 'utime'.
 if run_su "mount -t $FILESYSTEM \
-    -o rw,umask=0000 \
+    -o rw,umask=0000,uid=0,gid=0 \
     $MAPPER_PATH $MOUNT_POINT"; then
     log "$FILESYSTEM partition mounted successfully."
 else
@@ -292,8 +291,9 @@ else
 fi
 
 # Use Bindfs for main SD
+# Removed noatime here as well
 if run_su "$BINDFS_BIN \
-    -o nosuid,nodev,noatime,nonempty \
+    -o nosuid,nodev,nonempty \
     -u $BIND_USER -g $BIND_GROUP \
     -p a-rwx,ug+rw,o+rwx,ugo+X \
     --create-with-perms=a-rwx,ug+rw,o+rwx,ugo+X \
@@ -309,6 +309,6 @@ fi
 # Process Redirected Folders
 bind_redirect_folders
 
-log "01-mount-luks-sd.sh completed successfully."
+log "mountcompleted successfully."
 notify "Mounting SD Card Successful."
 exit 0
