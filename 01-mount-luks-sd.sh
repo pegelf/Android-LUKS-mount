@@ -23,6 +23,7 @@ VISIBLE_MOUNT_POINT="/sdcard/SD"
 # These folders on Internal Storage will be moved to SD and bind-mounted back.
 # If a folder does not exist yet (e.g. before installing an app), it will be created automatically.
 # CAUTION: Data will be moved physically to the encrypted SD card.
+# Uncomment the lines below to enable redirection.
 REDIRECT_FOLDERS=(
     # "SwiftBackup"
     # "DCIM/Camera"
@@ -36,6 +37,10 @@ HIDDEN_SD_STORAGE=".mountedinternal"
 
 # Filesystem Type (exfat, f2fs, ext4, etc.)
 FILESYSTEM="exfat"
+
+# Filesystem Check Settings
+# Set to true to run fsck on every boot (can be slow for large cards)
+ENABLE_FSCK=false
 
 # Binaries
 CRYPTSETUP_BIN="/data/data/com.termux/files/usr/bin/cryptsetup"
@@ -75,6 +80,33 @@ notify() {
     fi
 }
 
+# Function to run filesystem check
+run_fsck() {
+    if [ "$ENABLE_FSCK" != true ]; then
+        log "Filesystem check skipped (disabled in config)."
+        return 0
+    fi
+
+    # Attempt to run fsck on the mapped device before mounting
+    log "Running filesystem check on $MAPPER_PATH..."
+    
+    # Auto-detect fsck tool based on filesystem
+    local fsck_bin="fsck.$FILESYSTEM"
+    
+    if su -Mc "command -v $fsck_bin >/dev/null"; then
+        # -a or -p usually means "automatically repair", -y means "yes to all"
+        # exfat usually uses fsck.exfat -a
+        if su -Mc "$fsck_bin -a $MAPPER_PATH"; then
+            log "Filesystem check passed/repaired."
+        else
+            log "WARNING: Filesystem check returned errors."
+            notify "Warning: SD Card filesystem errors detected."
+        fi
+    else
+        log "Fsck tool $fsck_bin not found. Skipping check."
+    fi
+}
+
 # Function to unmount specific bind folders (Downloads, DCIM, etc.)
 unbind_internal_folders() {
     # Check if array is empty
@@ -103,11 +135,8 @@ unbind_internal_folders() {
 
 unmount_sd() {
     log "Starting unmount process..."
-
-    # 1. Unmount redirected internal folders FIRST
     unbind_internal_folders
 
-    # 2. Unmount the visible bind mount
     if su -Mc "mount | grep -q \"$VISIBLE_MOUNT_POINT\""; then
         if su -Mc "umount \"$VISIBLE_MOUNT_POINT\""; then
             log "Unmounted bind point $VISIBLE_MOUNT_POINT."
@@ -116,7 +145,6 @@ unmount_sd() {
         fi
     fi
 
-    # 3. Unmount the real mount point
     if su -Mc "mount | grep -q \"$REAL_MOUNT_POINT\""; then
         if su -Mc "umount \"$REAL_MOUNT_POINT\""; then
             log "Unmounted real mount point $REAL_MOUNT_POINT."
@@ -125,7 +153,6 @@ unmount_sd() {
         fi
     fi
 
-    # 4. Close LUKS container
     if [ -e "$MAPPER_PATH" ]; then
         if su -Mc "$CRYPTSETUP_BIN luksClose $LUKS_NAME"; then
             log "LUKS container closed successfully."
@@ -137,6 +164,40 @@ unmount_sd() {
     notify "Unmounting SD Card completed."
     log "Unmount process completed."
     exit 0
+}
+
+# Helper to check available space
+# Returns 0 if space is sufficient, 1 otherwise
+check_space() {
+    local src_path="$1"
+    local dest_path="$2"
+
+    # Get size of source in KB
+    local src_size=$(su -Mc "du -sk \"$src_path\"" | awk '{print $1}')
+    
+    # Get available space on destination in KB
+    local dest_avail=$(su -Mc "df -k \"$dest_path\"" | awk 'NR==2 {print $4}')
+
+    # Add 10% buffer
+    local required_space=$((src_size + (src_size / 10)))
+
+    if [ "$dest_avail" -gt "$required_space" ]; then
+        return 0
+    else
+        log "Not enough space! Source: ${src_size}KB, Dest Avail: ${dest_avail}KB"
+        return 1
+    fi
+}
+
+# Helper to check if folder is busy
+is_folder_busy() {
+    local folder="$1"
+    # Check using lsof if available, otherwise assume safe if not explicitly locked
+    # Grep checks if any process has an open file handle in this directory
+    if su -Mc "lsof +D \"$folder\" > /dev/null 2>&1"; then
+        return 0 # Busy
+    fi
+    return 1 # Not busy
 }
 
 bind_redirect_folders() {
@@ -180,24 +241,36 @@ bind_redirect_folders() {
         # 2. Check if Internal path exists and has content
         # We only move data if the internal path exists and is NOT already a mountpoint
         if su -Mc "[ -d \"$INTERNAL_PATH\" ]" && ! su -Mc "mount | grep -q \" $INTERNAL_PATH \""; then
-            
-            # Check if directory is not empty
             if su -Mc "[ \"\$(ls -A \"$INTERNAL_PATH\")\" ]"; then
-                log "Migrating data for $folder to SD card..."
-                notify "Moving files for $folder to SD card... This may take time."
                 
-                # Move content. We use 'cp -rn' and 'rm' logic or 'mv' depending on preference.
-                # 'mv' is atomic on same FS, but copy-delete across FS.
-                # using 'mv' inside su -c.
-                # We use -n (no clobber) to prevent overwriting if file already exists on SD
-                if su -Mc "mv -n \"$INTERNAL_PATH\"/* \"$SD_PATH\"/"; then
-                    log "Moved content of $folder successfully."
+                # 1. Check Space
+                if ! check_space "$INTERNAL_PATH" "$REAL_MOUNT_POINT"; then
+                    log "SKIP MIGRATION for $folder: Not enough space on SD card."
+                    notify "Error: Not enough space to move $folder"
+                    # We continue to bind-mount anyway? 
+                    # Warning: If we bind mount now, internal files will be hidden but NOT moved.
+                    # This is safer than a partial move.
+                
+                # 2. Check for Busy Files
+                elif is_folder_busy "$INTERNAL_PATH"; then
+                    log "SKIP MIGRATION for $folder: Folder is in use by another app."
+                    notify "Warning: $folder is in use. Files not moved."
+                
                 else
-                    log "WARNING: Error moving files for $folder. Check logs. Proceeding with mount anyway."
-                    notify "Warning: Moving files for $folder failed or incomplete."
+                    log "Migrating data for $folder to SD card..."
+                    notify "Moving files for $folder to SD card..."
+                    
+                    # 3. Move with dotglob enabled to catch .hidden files
+                    # We wrap the command in a subshell with shopt enabled inside su
+                    if su -Mc "bash -c 'shopt -s dotglob; mv -n \"$INTERNAL_PATH\"/* \"$SD_PATH\"/'"; then
+                        log "Moved content of $folder successfully."
+                    else
+                        log "WARNING: Error moving files for $folder."
+                        notify "Warning: Moving files for $folder failed."
+                    fi
                 fi
             else
-                log "$folder is empty or only contains hidden files. No migration needed."
+                log "$folder is empty. No migration needed."
             fi
         fi
 
@@ -263,6 +336,9 @@ else
     log "LUKS container already open."
 fi
 
+# FSCK CHECK
+run_fsck
+
 # 4. Prepare Mount Points
 su -Mc "mkdir -p \"$REAL_MOUNT_POINT\""
 su -Mc "mkdir -p \"$VISIBLE_MOUNT_POINT\""
@@ -274,7 +350,6 @@ su -Mc "mkdir -p \"$VISIBLE_MOUNT_POINT\""
 MOUNT_OPTS="rw,noatime"
 
 if [[ "$FILESYSTEM" == "exfat" || "$FILESYSTEM" == "vfat" || "$FILESYSTEM" == "ntfs" ]]; then
-    # uid=1023 (media_rw), gid=9997 (everybody)
     MOUNT_OPTS="$MOUNT_OPTS,uid=$ANDROID_UID,gid=$ANDROID_GID,fmask=0002,dmask=0002,context=u:object_r:sdcardfs:s0"
 else
     log "Filesystem is $FILESYSTEM. Permissions will be fixed after mount."
