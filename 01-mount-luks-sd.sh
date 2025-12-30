@@ -1,18 +1,35 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
-# Variables
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+
+# Log file location
 LOGFILE="$(dirname "$0")/LuksSD.log"
+
+# LUKS Configuration
 LUKS_DEVICE="/dev/block/mmcblk1p1"
 LUKS_NAME="LuksSD"
 MAPPER_PATH="/dev/mapper/$LUKS_NAME"
-MOUNT_POINT="/mnt/LuksSD.bind"
-BIND_TARGET="/sdcard/SD"
-BIND_USER="media_rw" # Insert the output of "whoami" command here, e.g., u0_a123. But media_rw also works for most apps.
-CRYPTSETUP_BIN="/data/data/com.termux/files/usr/bin/cryptsetup"
-BINDFS_BIN="/data/data/com.termux/files/usr/bin/bindfs"
 PASSWORD="LUKS_PASSWORD"
-FILESYSTEM="exfat" # Default filesystem
+
+# Mount Configuration
+# We mount to a stable system location first, then bind to the visible SD path.
+REAL_MOUNT_POINT="/mnt/LuksSD_Root"
+VISIBLE_MOUNT_POINT="/sdcard/SD"
+
+# Filesystem Type (exfat, f2fs, ext4, etc.)
+FILESYSTEM="exfat"
+
+# Binaries
+CRYPTSETUP_BIN="/data/data/com.termux/files/usr/bin/cryptsetup"
+
+# Notification Settings
 NOTIFICATIONS=true
+
+# ==============================================================================
+# FUNCTIONS
+# ==============================================================================
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOGFILE"
@@ -23,10 +40,7 @@ notify() {
         if command -v termux-notification >/dev/null 2>&1; then
             timeout 5s termux-notification --title "SD Card Mount" \
                 --content "$1" \
-                --priority high \
-                # Open Log button, doesn't work yet
-                ## --button1 "Open Log" \
-                ## --button1-action "termux-open --content-type text/plain \"$LOGFILE\""
+                --priority high
             if [ $? -ne 0 ]; then
                 log "termux-notification failed or timed out. Disabling notifications."
                 NOTIFICATIONS=false
@@ -38,29 +52,34 @@ notify() {
     fi
 }
 
-# Function to unmount
 unmount_sd() {
     log "Starting unmount process..."
 
-    # Unmount bindfs
-    if su -Mc "umount $BIND_TARGET"; then
-        log "Bindfs unmounted successfully from $BIND_TARGET."
-    else
-        log "Failed to unmount bindfs from $BIND_TARGET."
+    # 1. Unmount the visible bind mount
+    if su -Mc "mount | grep -q \"$VISIBLE_MOUNT_POINT\""; then
+        if su -Mc "umount \"$VISIBLE_MOUNT_POINT\""; then
+            log "Unmounted bind point $VISIBLE_MOUNT_POINT."
+        else
+            log "Failed to unmount $VISIBLE_MOUNT_POINT."
+        fi
     fi
 
-    # Unmount main mount point
-    if su -Mc "umount $MOUNT_POINT"; then
-        log "Unmounted successfully from $MOUNT_POINT."
-    else
-        log "Failed to unmount $MOUNT_POINT."
+    # 2. Unmount the real mount point
+    if su -Mc "mount | grep -q \"$REAL_MOUNT_POINT\""; then
+        if su -Mc "umount \"$REAL_MOUNT_POINT\""; then
+            log "Unmounted real mount point $REAL_MOUNT_POINT."
+        else
+            log "Failed to unmount $REAL_MOUNT_POINT."
+        fi
     fi
 
-    # Close LUKS container
-    if su -Mc "$CRYPTSETUP_BIN luksClose $LUKS_NAME"; then
-        log "LUKS container closed successfully."
-    else
-        log "Failed to close LUKS container."
+    # 3. Close LUKS container
+    if [ -e "$MAPPER_PATH" ]; then
+        if su -Mc "$CRYPTSETUP_BIN luksClose $LUKS_NAME"; then
+            log "LUKS container closed successfully."
+        else
+            log "Failed to close LUKS container."
+        fi
     fi
 
     notify "Unmounting SD Card completed."
@@ -68,70 +87,102 @@ unmount_sd() {
     exit 0
 }
 
-# Start logging
+# ==============================================================================
+# MAIN SCRIPT
+# ==============================================================================
+
 log "Starting 01-mount-luks-sd.sh..."
 
-# Check if script is run with --umount
+# Check if script is run with --umount argument
 if [ "$1" == "--umount" ]; then
     unmount_sd
 fi
 
-# Check if already mounted
-if su -Mc "mount | grep -q \"$MOUNT_POINT\""; then
-    log "Mount point $MOUNT_POINT is already mounted."
-    notify "Mounting SD Card Skipped: Already mounted."
+# 1. Check if already mounted
+if su -Mc "mount | grep -q \"$VISIBLE_MOUNT_POINT\""; then
+    log "Mount point $VISIBLE_MOUNT_POINT is already mounted."
+    notify "Mounting Skipped: Already mounted."
     exit 0
 fi
 
-# Check if an SD card is inserted
+# 2. Check if the block device exists
 if ! su -Mc "[ -b \"$LUKS_DEVICE\" ]"; then
-    log "No SD card detected at $LUKS_DEVICE."
-    notify "Mounting SD Card Failed: No SD card detected."
+    log "No SD card device detected at $LUKS_DEVICE."
+    notify "Mounting Failed: Device not found."
     exit 1
 fi
 
-# Unlock the LUKS container
-if su -Mc 'echo "'"$PASSWORD"'" | '"$CRYPTSETUP_BIN"' luksOpen '"$LUKS_DEVICE"' '"$LUKS_NAME"' -'; then
-    log "LUKS container unlocked successfully."
+# 3. Unlock LUKS Container (if not already open)
+if [ ! -e "$MAPPER_PATH" ]; then
+    log "Opening LUKS container..."
+    if su -Mc 'echo "'"$PASSWORD"'" | '"$CRYPTSETUP_BIN"' luksOpen '"$LUKS_DEVICE"' '"$LUKS_NAME"' -'; then
+        log "LUKS container unlocked successfully."
+    else
+        log "Failed to unlock LUKS container. Check password or device."
+        notify "Mounting Failed: LUKS unlock error."
+        exit 1
+    fi
 else
-    log "Failed to unlock LUKS container."
-    notify "Mounting SD Card Failed: LUKS unlock failed."
-    exit 1
+    log "LUKS container already open."
 fi
 
-# Create mount point
-su -Mc "mkdir -p \"$MOUNT_POINT\""
-su -Mc "chown media_rw:media_rw $MOUNT_POINT"
+# 4. Prepare Mount Points
+su -Mc "mkdir -p \"$REAL_MOUNT_POINT\""
+su -Mc "mkdir -p \"$VISIBLE_MOUNT_POINT\""
 
-# Create bind target
-mkdir -p "$BIND_TARGET"
+# 5. Determine Mount Options based on Filesystem
+# Android apps require specific UIDs (often media_rw/1023) and GIDs (everybody/9997).
+# Native filesystems (f2fs/ext4) set this via chown after mounting.
+# FAT/exFAT must set this via mount options.
 
-# Mount the partition with the specified filesystem
-log "Using filesystem: $FILESYSTEM"
-if su -Mc "mount -t $FILESYSTEM \
-    -o rw,umask=0000 \
-    $MAPPER_PATH $MOUNT_POINT"; then
-    log "$FILESYSTEM partition mounted successfully."
+MOUNT_OPTS="rw,noatime"
+
+if [[ "$FILESYSTEM" == "exfat" || "$FILESYSTEM" == "vfat" || "$FILESYSTEM" == "ntfs" ]]; then
+    # UID 1023 = media_rw, GID 9997 = everybody
+    # mask 0002 allows group write access (rwxrwxr-x)
+    # context=... tries to set SELinux label at mount time
+    MOUNT_OPTS="$MOUNT_OPTS,uid=1023,gid=9997,fmask=0002,dmask=0002,context=u:object_r:sdcardfs:s0"
+    log "Filesystem is $FILESYSTEM. Using options for permissions: $MOUNT_OPTS"
 else
-    log "Failed to mount $FILESYSTEM partition."
-    notify "Mounting SD Card Failed: $FILESYSTEM mount failed."
-    exit 1
+    log "Filesystem is $FILESYSTEM. Permissions will be fixed after mount."
 fi
 
-# Use Bindfs
-if su -Mc "$BINDFS_BIN \
-    -o nosuid,nodev,noatime,nonempty \
-    -u $BIND_USER -g 9997 \
-    -p a-rwx,ug+rw,o+rwx,ugo+X \
-    --create-with-perms=a-rwx,ug+rw,o+rwx,ugo+X \
-    --xattr-none --chown-ignore --chgrp-ignore --chmod-ignore \
-    $MOUNT_POINT $BIND_TARGET"; then
-    log "Bindfs mounted successfully."
+# 6. Mount the filesystem
+if su -Mc "mount -t $FILESYSTEM -o $MOUNT_OPTS $MAPPER_PATH \"$REAL_MOUNT_POINT\""; then
+    log "$FILESYSTEM mounted to $REAL_MOUNT_POINT."
 else
-    log "Failed to mount with bindfs."
-    notify "Mounting SD Card Failed: Bindfs mount failed."
+    log "Failed to mount to $REAL_MOUNT_POINT."
+    notify "Mounting Failed: FS Mount error."
     exit 1
 fi
 
-log "01-mount-luks-sd.sh completed successfully."
-notify "Mounting SD Card Successful."
+# 7. Apply Permissions (if using native FS like ext4/f2fs)
+if [[ "$FILESYSTEM" != "exfat" && "$FILESYSTEM" != "vfat" && "$FILESYSTEM" != "ntfs" ]]; then
+    log "Applying ownership and permissions for native filesystem..."
+    su -Mc "chown -R 1023:9997 \"$REAL_MOUNT_POINT\"" # media_rw:everybody
+    su -Mc "chmod -R 775 \"$REAL_MOUNT_POINT\""
+fi
+
+# 8. Apply SELinux Context (CRITICAL for App Access)
+# We try to apply this even if mounted with context= option, just to be safe.
+if su -Mc "chcon -R u:object_r:sdcardfs:s0 \"$REAL_MOUNT_POINT\""; then
+    log "SELinux context applied."
+else
+    log "Warning: Failed to apply SELinux context (might be supported by mount option only)."
+fi
+
+# 9. Bind Mount to visible location (/sdcard/SD)
+# This makes the mount visible in the user storage area
+if su -Mc "mount --bind \"$REAL_MOUNT_POINT\" \"$VISIBLE_MOUNT_POINT\""; then
+    log "Bind mount created at $VISIBLE_MOUNT_POINT."
+else
+    log "Failed to create bind mount."
+    notify "Mounting Failed: Bind error."
+    # Attempt cleanup
+    su -Mc "umount \"$REAL_MOUNT_POINT\""
+    exit 1
+fi
+
+log "Script completed successfully."
+notify "SD Card Mounted Successfully."
+exit 0
