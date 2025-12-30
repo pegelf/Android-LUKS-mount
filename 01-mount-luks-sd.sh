@@ -23,14 +23,14 @@ BIND_TARGET="/sdcard/SD"
 # These folders will be moved to the encrypted SD and mounted back via bindfs.
 REDIRECT_FOLDERS=(
     # "Test1"
-    # "Test2"
+    # "Download"
 )
 
 # Folder on the raw SD where redirected folders are stored
 HIDDEN_SD_STORAGE=".mountedinternal"
 
 # Bindfs User Configuration
-# u0_a384 is your user from the logs. media_rw works too.
+# user like u0_a384. You can check other folders permissions with ls -lah ~/storage/shared
 BIND_USER="media_rw"
 BIND_GROUP="9997" # 9997 is everybody/everybody
 
@@ -216,9 +216,8 @@ bind_redirect_folders() {
         fi
 
         # 4. Mount using BINDFS
-        # Added -o allow_other,context=... to enable full access including timestamps
         if run_su "$BINDFS_BIN \
-            -o nosuid,nodev,nonempty,allow_other,context=u:object_r:sdcardfs:s0 \
+            -o nosuid,nodev,nonempty \
             -u $BIND_USER -g $BIND_GROUP \
             -p a-rwx,ug+rw,o+rwx,ugo+X \
             --create-with-perms=a-rwx,ug+rw,o+rwx,ugo+X \
@@ -280,6 +279,7 @@ run_su "mkdir -p \"$BIND_TARGET\""
 # Mount the partition with the specified filesystem
 log "Using filesystem: $FILESYSTEM"
 # Added uid=0,gid=0 to ensure root owns the raw mount. 
+# This helps bindfs (running as root) to perform privileged ops like 'utime'.
 if run_su "mount -t $FILESYSTEM \
     -o rw,umask=0000,uid=0,gid=0 \
     $MAPPER_PATH $MOUNT_POINT"; then
@@ -292,7 +292,7 @@ fi
 
 # Use Bindfs for main SD
 if run_su "$BINDFS_BIN \
-    -o nosuid,nodev,nonempty,allow_other,context=u:object_r:sdcardfs:s0 \
+    -o nosuid,nodev,nonempty \
     -u $BIND_USER -g $BIND_GROUP \
     -p a-rwx,ug+rw,o+rwx,ugo+X \
     --create-with-perms=a-rwx,ug+rw,o+rwx,ugo+X \
@@ -308,6 +308,6 @@ fi
 # Process Redirected Folders
 bind_redirect_folders
 
-log "mounnt completed successfully."
+log "mount completed successfully."
 notify "Mounting SD Card Successful."
 exit 0
