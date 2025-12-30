@@ -40,8 +40,10 @@ FILESYSTEM="exfat"
 # Binaries
 CRYPTSETUP_BIN="/data/data/com.termux/files/usr/bin/cryptsetup"
 BINDFS_BIN="/data/data/com.termux/files/usr/bin/bindfs"
-# IMPORTANT: Full path to bash for usage inside 'su' to enable shopt
+# Full path to bash for usage inside 'su' to enable shopt
 TERMUX_BASH="/data/data/com.termux/files/usr/bin/bash"
+# Full path to GNU cp (Termux version) to allow specific preserve flags
+TERMUX_CP="/data/data/com.termux/files/usr/bin/cp"
 
 # Notification Settings
 NOTIFICATIONS=true
@@ -196,19 +198,22 @@ bind_redirect_folders() {
                 else
                     log "Migrating $folder to encrypted storage..."
                     notify "Moving files for $folder..."
-                    
-                    # Capture output for debugging. 
-                    # We use TERMUX_BASH explicitly because standard 'sh' in su might not support shopt or be bash compatible
-                    # nullglob prevents errors if * matches nothing despite ls -A finding something
-                    # 2>&1 captures errors to the variable
-                    move_output=$(run_su "$TERMUX_BASH -c 'shopt -s dotglob nullglob; mv -n \"$INTERNAL_PATH\"/* \"$RAW_PATH\"/' 2>&1")
-                    exit_code=$?
 
-                    if [ $exit_code -eq 0 ]; then
-                        log "Moved content of $folder successfully."
+                    # 1. Copy
+                    # Note: We construct the command string with variables expanded by the parent shell
+                    cmd="$TERMUX_BASH -c 'shopt -s dotglob nullglob; $TERMUX_CP --preserve=timestamps -rn \"$INTERNAL_PATH\"/* \"$RAW_PATH\"/'"
+                    cp_output=$(run_su "$cmd 2>&1")
+                    cp_exit_code=$?
+
+                    if [ $cp_exit_code -eq 0 ]; then
+                        log "Copied content of $folder successfully."
+                        
+                        # 2. Delete Source (only if copy succeeded)
+                        rm_output=$(run_su "$TERMUX_BASH -c 'shopt -s dotglob nullglob; rm -rf \"$INTERNAL_PATH\"/*' 2>&1")
+                        log "Cleaned up source $folder."
                     else
-                        log "Error moving files for $folder. Exit Code: $exit_code"
-                        log "Move Error Output: $move_output"
+                        log "Error copying files for $folder. Exit Code: $cp_exit_code"
+                        log "Copy Error Output: $cp_output"
                         notify "Warning: Moving files for $folder failed."
                     fi
                 fi
@@ -288,7 +293,7 @@ run_su "mkdir -p \"$BIND_TARGET\""
 # Mount the partition with the specified filesystem
 log "Using filesystem: $FILESYSTEM"
 if run_su "mount -t $FILESYSTEM \
-    -o rw,umask=0000 \
+    -o rw,umask=0000,uid=0,gid=0 \
     $MAPPER_PATH $MOUNT_POINT"; then
     log "$FILESYSTEM partition mounted successfully."
 else
