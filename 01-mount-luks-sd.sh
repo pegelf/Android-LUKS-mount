@@ -40,6 +40,8 @@ FILESYSTEM="exfat"
 # Binaries
 CRYPTSETUP_BIN="/data/data/com.termux/files/usr/bin/cryptsetup"
 BINDFS_BIN="/data/data/com.termux/files/usr/bin/bindfs"
+# IMPORTANT: Full path to bash for usage inside 'su' to enable shopt
+TERMUX_BASH="/data/data/com.termux/files/usr/bin/bash"
 
 # Notification Settings
 NOTIFICATIONS=true
@@ -195,11 +197,18 @@ bind_redirect_folders() {
                     log "Migrating $folder to encrypted storage..."
                     notify "Moving files for $folder..."
                     
-                    # Move content. bash -c needed for shopt dotglob
-                    if run_su "bash -c 'shopt -s dotglob; mv -n \"$INTERNAL_PATH\"/* \"$RAW_PATH\"/'"; then
+                    # Capture output for debugging. 
+                    # We use TERMUX_BASH explicitly because standard 'sh' in su might not support shopt or be bash compatible
+                    # nullglob prevents errors if * matches nothing despite ls -A finding something
+                    # 2>&1 captures errors to the variable
+                    move_output=$(run_su "$TERMUX_BASH -c 'shopt -s dotglob nullglob; mv -n \"$INTERNAL_PATH\"/* \"$RAW_PATH\"/' 2>&1")
+                    exit_code=$?
+
+                    if [ $exit_code -eq 0 ]; then
                         log "Moved content of $folder successfully."
                     else
-                        log "Error moving files for $folder."
+                        log "Error moving files for $folder. Exit Code: $exit_code"
+                        log "Move Error Output: $move_output"
                         notify "Warning: Moving files for $folder failed."
                     fi
                 fi
@@ -278,10 +287,8 @@ run_su "mkdir -p \"$BIND_TARGET\""
 
 # Mount the partition with the specified filesystem
 log "Using filesystem: $FILESYSTEM"
-# Added uid=0,gid=0 to ensure root owns the raw mount. 
-# This helps bindfs (running as root) to perform privileged ops like 'utime'.
 if run_su "mount -t $FILESYSTEM \
-    -o rw,umask=0000,uid=0,gid=0 \
+    -o rw,umask=0000 \
     $MAPPER_PATH $MOUNT_POINT"; then
     log "$FILESYSTEM partition mounted successfully."
 else
